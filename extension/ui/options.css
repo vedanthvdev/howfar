@@ -48,6 +48,62 @@ h1 {
   margin: 0 0 8px;
 }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  margin: -4px -4px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfbfd;
+  cursor: pointer;
+}
+.toggle-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.toggle-row__title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.toggle-row__hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: #d1d5db;
+  position: relative;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+  margin: 0;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: transform 140ms ease-out;
+}
+.toggle:checked { background: var(--accent); }
+.toggle:checked::after { transform: translateX(16px); }
+.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .field {
   display: block;
   margin-bottom: 16px;

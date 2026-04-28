@@ -16,6 +16,31 @@
   const pausedMsg = document.getElementById("paused-msg");
   const pausedOptionsBtn = document.getElementById("paused-options");
   const budgetSummary = document.getElementById("budget-summary");
+  const enabledInput = document.getElementById("enabled");
+  const toggleLabel = document.getElementById("toggle-label");
+  const disabledSection = document.getElementById("disabled");
+
+  // Tracks the current `enabled` flag in this popup. Affects which UI
+  // sections render and whether the rescan button is interactive (disabled
+  // state outranks the budget-paused state — there's nothing to rescan if
+  // we aren't scanning).
+  let enabledState = true;
+
+  function renderEnabled(enabled) {
+    enabledState = !!enabled;
+    enabledInput.checked = enabledState;
+    toggleLabel.textContent = enabledState ? "On" : "Off";
+    disabledSection.hidden = enabledState;
+    if (!enabledState) {
+      // Hide everything that depends on scanning when we're off — the user
+      // doesn't need to see stale results or the empty-state nag.
+      listSection.hidden = true;
+      pausedSection.hidden = true;
+      rescanBtn.disabled = true;
+    } else {
+      rescanBtn.disabled = false;
+    }
+  }
 
   function fmtUsd(n) {
     const v = Number.isFinite(n) ? n : 0;
@@ -23,19 +48,23 @@
   }
 
   function renderBudget(budget) {
+    // When the user has disabled the extension, suppress the budget-paused
+    // chrome entirely — "off" is the dominant state and we don't want to
+    // confuse users by also flashing a free-tier banner. The footer summary
+    // is still informative (it shows current spend) so we keep it.
     if (!budget) {
-      pausedSection.hidden = true;
+      if (enabledState) pausedSection.hidden = true;
       budgetSummary.hidden = true;
-      rescanBtn.disabled = false;
+      if (enabledState) rescanBtn.disabled = false;
       return;
     }
-    if (budget.tripped) {
+    if (budget.tripped && enabledState) {
       pausedSection.hidden = false;
       pausedMsg.textContent =
         budget.trippedReason ||
         "Scanning paused to keep you under your monthly Google Maps budget.";
       rescanBtn.disabled = true;
-    } else {
+    } else if (enabledState) {
       pausedSection.hidden = true;
       rescanBtn.disabled = false;
     }
@@ -172,6 +201,7 @@
 
   async function loadBase() {
     const response = await chrome.runtime.sendMessage({ type: MESSAGES.GET_BASE });
+    renderEnabled(response?.enabled !== false);
     renderBudget(response?.budget);
     if (response?.base) {
       baseSection.hidden = false;
@@ -185,6 +215,7 @@
   }
 
   async function loadResults() {
+    if (!enabledState) return;
     const tab = await getActiveTab();
     if (!tab?.id) return;
     const response = await chrome.runtime.sendMessage({
@@ -233,6 +264,27 @@
       loadResults();
     } else if (msg?.type === MESSAGES.BUDGET_UPDATED) {
       renderBudget(msg.payload);
+    } else if (msg?.type === MESSAGES.ENABLED_CHANGED) {
+      renderEnabled(msg.payload?.enabled !== false);
+    }
+  });
+
+  enabledInput.addEventListener("change", async () => {
+    const enabled = enabledInput.checked;
+    // Optimistic flip so the toggle feels instant even on a slow SW wakeup.
+    renderEnabled(enabled);
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGES.SET_ENABLED,
+      payload: { enabled },
+    });
+    if (!response?.ok) {
+      renderEnabled(!enabled);
+      return;
+    }
+    // After re-enabling, the active tab's content script has just been told
+    // to rescan. Pull fresh results into the popup once they trickle back.
+    if (enabled) {
+      setTimeout(() => loadResults().catch(() => {}), 600);
     }
   });
 

@@ -5,12 +5,26 @@
   const addressInput = document.getElementById("address");
   const backendInput = document.getElementById("backend");
   const adminTokenInput = document.getElementById("admin-token");
+  const enabledInput = document.getElementById("enabled");
+  const toggleHint = document.getElementById("toggle-hint");
   const statusEl = document.getElementById("status");
   const saveBtn = document.getElementById("save");
   const clearBtn = document.getElementById("clear");
   const currentCard = document.getElementById("current");
   const currentAddr = document.getElementById("current-addr");
   const currentCoords = document.getElementById("current-coords");
+
+  const TOGGLE_HINT_ON =
+    "Scanning new addresses and showing badges on every page.";
+  const TOGGLE_HINT_OFF =
+    "Paused. No pages are scanned and no API calls are made.";
+
+  function renderEnabled(enabled) {
+    enabledInput.checked = !!enabled;
+    if (toggleHint) {
+      toggleHint.textContent = enabled ? TOGGLE_HINT_ON : TOGGLE_HINT_OFF;
+    }
+  }
 
   function setStatus(text, kind) {
     statusEl.textContent = text;
@@ -63,6 +77,7 @@
 
   async function load() {
     const s = await chrome.runtime.sendMessage({ type: MESSAGES.GET_BASE });
+    renderEnabled(s?.enabled !== false);
     setUnits(s?.units ?? "imperial");
     setModes(s?.modes);
     backendInput.value = s?.backendUrl ?? "";
@@ -211,6 +226,27 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === MESSAGES.BUDGET_UPDATED) renderBudget(msg.payload);
+    else if (msg?.type === MESSAGES.ENABLED_CHANGED) {
+      renderEnabled(msg.payload?.enabled !== false);
+    }
+  });
+
+  enabledInput.addEventListener("change", async () => {
+    const enabled = enabledInput.checked;
+    // Optimistic UI: flip hint immediately, even before the SW confirms. The
+    // checkbox is already in the new state per the browser default. If the
+    // SW rejects, we'll resync from its response.
+    renderEnabled(enabled);
+    const response = await chrome.runtime.sendMessage({
+      type: MESSAGES.SET_ENABLED,
+      payload: { enabled },
+    });
+    if (!response?.ok) {
+      renderEnabled(!enabled);
+      setStatus(response?.error ?? "Failed to update", "error");
+      return;
+    }
+    setStatus(enabled ? "HowFar enabled." : "HowFar disabled.", "success");
   });
 
   form.addEventListener("submit", async (e) => {
