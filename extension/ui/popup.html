@@ -9,8 +9,21 @@
   <body>
     <header class="hdr">
       <h1>HowFar</h1>
-      <button id="rescan" type="button" class="btn btn--ghost">Rescan</button>
+      <div class="hdr__actions">
+        <label class="toggle-wrap" title="Enable or disable HowFar">
+          <span id="toggle-label" class="toggle-wrap__label">On</span>
+          <input id="enabled" type="checkbox" class="toggle" checked />
+        </label>
+        <button id="rescan" type="button" class="btn btn--ghost">Rescan</button>
+      </div>
     </header>
+
+    <section id="disabled" class="disabled" hidden role="status">
+      <div class="disabled__title">HowFar is off</div>
+      <div class="disabled__msg">
+        No pages are being scanned. Flip the switch above to resume.
+      </div>
+    </section>
 
     <section id="paused" class="paused" hidden role="alert">
       <div class="paused__title">⚠ Free-tier cap reached</div>

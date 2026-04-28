@@ -23,6 +23,7 @@ const { distanceCacheKey } = self.WDFNormalize;
 const DEFAULT_BACKEND = "http://localhost:8787";
 const DEFAULT_UNITS = "imperial";
 const DEFAULT_MODES = [...MODE_ORDER];
+const DEFAULT_ENABLED = true;
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const BUDGET_POLL_ALARM = "wdf-budget-poll";
 const BUDGET_POLL_INTERVAL_MIN = 5;
@@ -118,6 +119,7 @@ async function getSettings() {
     "backendUrl",
     "modes",
     "adminToken",
+    "enabled",
   ]);
   return {
     base: stored.base ?? null,
@@ -125,11 +127,45 @@ async function getSettings() {
     backendUrl: (stored.backendUrl ?? DEFAULT_BACKEND).replace(/\/$/, ""),
     modes: sanitizeModes(stored.modes),
     adminToken: stored.adminToken ?? "",
+    // `enabled` is a master kill switch the user controls from the popup or
+    // options page. When false: content scripts tear down badges and stop
+    // observing, the SW refuses RESOLVE_CANDIDATES (no API spend), and the
+    // budget poller pauses. Default true so first-run UX is unchanged.
+    enabled: stored.enabled === undefined ? DEFAULT_ENABLED : Boolean(stored.enabled),
   };
 }
 
 async function setSettings(patch) {
   await chrome.storage.local.set(patch);
+}
+
+/**
+ * Tell every UI surface (popup, options) AND every content script that the
+ * enabled flag changed. We address content scripts via tabs.query because
+ * runtime.sendMessage doesn't reach them — only same-context listeners.
+ *
+ * Both sends are best-effort: tabs without our content script (chrome://,
+ * about:, restricted origins) reject the message and that's fine.
+ */
+function broadcastEnabled(enabled) {
+  chrome.runtime
+    .sendMessage({ type: MESSAGES.ENABLED_CHANGED, payload: { enabled } })
+    .catch(() => {
+      // No popup/options open — fine.
+    });
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (typeof tab.id !== "number") continue;
+      chrome.tabs
+        .sendMessage(tab.id, {
+          type: MESSAGES.ENABLED_CHANGED,
+          payload: { enabled },
+        })
+        .catch(() => {
+          // Tab has no content script (chrome://, web store, etc.) — fine.
+        });
+    }
+  });
 }
 
 function broadcastBudget() {
@@ -290,7 +326,16 @@ function pausedResult(id, reason) {
 
 async function resolveDistances(tabId, candidates) {
   await hydrationPromise;
-  const { base, units, backendUrl, modes } = await getSettings();
+  const { base, units, backendUrl, modes, enabled } = await getSettings();
+
+  // Master kill switch. Belt-and-braces: the content script also stops
+  // scanning when disabled, but if anything slips through, refuse here.
+  // Returning empty results (rather than throwing) lets callers no-op
+  // cleanly without painting error badges.
+  if (!enabled) {
+    updatePageResults(tabId, candidates, []);
+    return { results: [], disabled: true };
+  }
 
   // Even when the breaker is tripped, we still serve cache hits. That
   // keeps already-seen addresses usable during a monthly pause — only
@@ -543,6 +588,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await chrome.storage.local.remove("base");
       distCache.clear();
       sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === MESSAGES.SET_ENABLED) {
+    (async () => {
+      try {
+        await hydrationPromise;
+        const enabled = Boolean(msg.payload?.enabled);
+        await setSettings({ enabled });
+        // Cache survives toggles — distances haven't changed. But broadcast
+        // immediately so the active tab can tear down or paint badges.
+        broadcastEnabled(enabled);
+        sendResponse({ ok: true, enabled });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
+      }
     })();
     return true;
   }

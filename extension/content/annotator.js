@@ -9,8 +9,8 @@
  * e.g. "1.6 mi · 🚶 32m · 🚗 8m · 🚴 12m".
  */
 (function (root) {
-  const BADGE_CLASS = "wdf-badge";
-  const BADGE_ATTR = "data-wdf-candidate";
+  const BADGE_CLASS = "howfar-badge";
+  const BADGE_ATTR = "data-howfar-candidate";
   const MODE_ORDER = root.WDFModeOrder ?? ["walk", "drive", "cycle"];
   const MODE_ICONS = root.WDFModeIcons ?? { walk: "🚶", drive: "🚗", cycle: "🚴" };
   const MODE_LABELS =

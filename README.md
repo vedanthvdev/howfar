@@ -2,8 +2,7 @@
 
 How far is every address on this page from home? HowFar is a Chrome MV3
 extension that finds postal addresses on any web page you visit and shows
-the walking distance plus walk / drive / cycle times from a base address
-you save once.
+walk, drive, and cycle times from a base address you save once.
 
 ```
           page
