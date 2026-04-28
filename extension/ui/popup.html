@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HowFar</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="hdr">
+      <h1>HowFar</h1>
+      <button id="rescan" type="button" class="btn btn--ghost">Rescan</button>
+    </header>
+
+    <section id="paused" class="paused" hidden role="alert">
+      <div class="paused__title">⚠ Free-tier cap reached</div>
+      <div id="paused-msg" class="paused__msg"></div>
+      <div class="paused__actions">
+        <button id="paused-options" type="button" class="btn btn--ghost">Open options</button>
+      </div>
+    </section>
+
+    <section id="base" class="base" hidden>
+      <div class="base__label">Base</div>
+      <div id="base-address" class="base__addr"></div>
+    </section>
+
+    <section id="empty" class="empty">
+      <p>Set your base address in options to get started.</p>
+      <button id="open-options" type="button" class="btn">Open options</button>
+    </section>
+
+    <section id="list" class="list" hidden>
+      <ul id="results" class="results"></ul>
+    </section>
+
+    <footer class="ftr">
+      <a id="footer-options" href="#" data-action="open-options">Options</a>
+      <span id="budget-summary" class="ftr__budget" hidden></span>
+      <span id="status"></span>
+    </footer>
+
+    <script src="../shared/types.js"></script>
+    <script src="../shared/messages.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

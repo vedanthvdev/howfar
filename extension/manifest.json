@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "HowFar",
+  "version": "0.1.0",
+  "description": "How far is every address on this page from home? Walking, driving, and cycling times next to each one.",
+  "permissions": ["storage", "activeTab", "scripting", "alarms"],
+  "host_permissions": ["http://localhost:8787/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "HowFar",
+    "default_popup": "ui/popup.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "32": "assets/icon-32.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "assets/icon-16.png",
+    "32": "assets/icon-32.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "run_at": "document_idle",
+      "all_frames": false,
+      "js": [
+        "shared/types.js",
+        "shared/normalize.js",
+        "shared/messages.js",
+        "content/extractor-structured.js",
+        "content/extractor-text.js",
+        "content/annotator.js",
+        "content/scanner.js"
+      ],
+      "css": ["content/styles.css"]
+    }
+  ]
+}

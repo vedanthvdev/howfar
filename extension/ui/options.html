@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HowFar · Options</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>HowFar</h1>
+      <p class="lead">Save the base address every distance should be measured from.</p>
+
+      <form id="form" class="card">
+        <label class="field">
+          <span class="field__label">Base address</span>
+          <input
+            id="address"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="221B Baker Street, London"
+            required
+          />
+          <span class="field__hint">
+            Entered once. We validate it, then cache canonical address + coordinates.
+          </span>
+        </label>
+
+        <fieldset class="field">
+          <legend class="field__label">Units</legend>
+          <label class="radio">
+            <input type="radio" name="units" value="imperial" checked />
+            <span>Imperial (mi / ft)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="units" value="metric" />
+            <span>Metric (km / m)</span>
+          </label>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend class="field__label">Travel modes</legend>
+          <span class="field__hint">Pick which times to display next to each address.</span>
+          <label class="check">
+            <input type="checkbox" name="modes" value="walk" checked />
+            <span><span aria-hidden="true">🚶</span> Walking</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="modes" value="drive" checked />
+            <span><span aria-hidden="true">🚗</span> Driving</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="modes" value="cycle" checked />
+            <span><span aria-hidden="true">🚴</span> Cycling</span>
+          </label>
+        </fieldset>
+
+        <label class="field">
+          <span class="field__label">Backend URL</span>
+          <input
+            id="backend"
+            type="url"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="http://localhost:8787"
+          />
+          <span class="field__hint">
+            Points at the companion API. Defaults to <code>http://localhost:8787</code>.
+          </span>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Admin token</span>
+          <input
+            id="admin-token"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="auto-filled on localhost"
+          />
+          <span class="field__hint">
+            Needed to reset the monthly quota. On localhost the extension
+            can fetch it automatically; otherwise paste the value of
+            <code>BUDGET_ADMIN_TOKEN</code> from your <code>.env</code>.
+          </span>
+        </label>
+
+        <div class="actions">
+          <button id="save" type="submit" class="btn btn--primary">Save</button>
+          <button id="clear" type="button" class="btn btn--ghost">Clear base</button>
+        </div>
+
+        <p id="status" class="status" aria-live="polite"></p>
+      </form>
+
+      <section id="current" class="card card--dim" hidden>
+        <h2>Saved base</h2>
+        <div id="current-addr" class="addr"></div>
+        <div id="current-coords" class="coords"></div>
+      </section>
+
+      <section id="budget" class="card card--dim">
+        <h2>Free-tier safeguard</h2>
+        <p class="field__hint" id="budget-blurb">
+          The backend stops calling Google once estimated spend reaches your
+          configured monthly cap.
+        </p>
+        <div id="budget-tripped" class="alert" hidden>
+          <strong>Scanning paused.</strong>
+          <span id="budget-tripped-reason"></span>
+          Click <em>Reset monthly quota</em> below to resume.
+        </div>
+        <div class="usage">
+          <div class="usage__bar">
+            <div id="usage-fill" class="usage__fill" style="width:0%"></div>
+          </div>
+          <div class="usage__meta">
+            <span id="usage-label">—</span>
+            <span id="usage-percent" class="usage__percent">—</span>
+          </div>
+          <div id="usage-counts" class="usage__counts">—</div>
+        </div>
+        <div class="actions">
+          <button id="budget-reset" type="button" class="btn">
+            Reset monthly quota
+          </button>
+          <button id="budget-refresh" type="button" class="btn btn--ghost">
+            Refresh
+          </button>
+        </div>
+        <p id="budget-status" class="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <script src="../shared/types.js"></script>
+    <script src="../shared/messages.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>
