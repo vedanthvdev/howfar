@@ -1,6 +1,6 @@
 """Generates placeholder PNG icons for the extension. Run once.
 
-Produces a flat-colored rounded square with a white footprint-ish glyph.
+Produces a flat-colored rounded square with a white pin glyph.
 Uses only the stdlib (struct + zlib) to avoid extra deps.
 """
 from __future__ import annotations

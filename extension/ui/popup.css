@@ -28,6 +28,7 @@ html, body {
   justify-content: space-between;
   padding: 12px 14px 8px;
   border-bottom: 1px solid var(--line);
+  gap: 8px;
 }
 .hdr h1 {
   margin: 0;
@@ -35,6 +36,60 @@ html, body {
   font-weight: 700;
   letter-spacing: 0.01em;
 }
+.hdr__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toggle-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
+  background: #d1d5db;
+  position: relative;
+  cursor: pointer;
+  transition: background-color 140ms ease-out;
+  margin: 0;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: transform 140ms ease-out;
+}
+.toggle:checked { background: var(--accent); }
+.toggle:checked::after { transform: translateX(12px); }
+.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-wrap:has(.toggle:checked) .toggle-wrap__label { color: var(--accent); }
+
+.disabled {
+  padding: 10px 14px;
+  background: #f3f4f6;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.disabled__title { font-weight: 700; color: var(--fg); margin-bottom: 2px; }
+.disabled__msg { font-size: 12px; line-height: 1.4; }
 
 .base {
   padding: 8px 14px;

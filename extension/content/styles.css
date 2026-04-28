@@ -1,5 +1,5 @@
 /* HowFar — inline annotation badges. */
-.wdf-badge {
+.howfar-badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -19,26 +19,26 @@
   transition: background-color 120ms ease-out, color 120ms ease-out;
 }
 
-.wdf-badge--loading {
+.howfar-badge--loading {
   color: #5a5a5a;
   background: #f0f0f0;
   border-color: #d6d6d6;
-  animation: wdf-pulse 1.2s ease-in-out infinite;
+  animation: howfar-pulse 1.2s ease-in-out infinite;
 }
 
-.wdf-badge--ok {
+.howfar-badge--ok {
   color: #0b3c2f;
   background: #d7f0e4;
   border-color: #9ccdb3;
 }
 
-.wdf-badge--warn {
+.howfar-badge--warn {
   color: #6a4b00;
   background: #fff2cc;
   border-color: #e9d595;
 }
 
-.wdf-badge--error {
+.howfar-badge--error {
   color: #7a1d1d;
   background: #fde2e2;
   border-color: #ecbaba;
@@ -46,13 +46,13 @@
 
 /* Distinct from error: we never tried Google because the monthly budget
    ran out. Calmer palette communicates "not broken, just on hold". */
-.wdf-badge--paused {
+.howfar-badge--paused {
   color: #3b2f7a;
   background: #e6e4fb;
   border-color: #c9c6ef;
 }
 
-@keyframes wdf-pulse {
+@keyframes howfar-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }

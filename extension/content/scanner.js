@@ -237,10 +237,39 @@
     });
   }
 
+  /**
+   * Tear down everything the scanner is doing on the page. Called when the
+   * user disables the extension. We stop observing mutations (so we don't
+   * needlessly run isBadgeOnlyMutation on every DOM change), cancel any
+   * pending debounced scan, and remove all badges.
+   */
+  function teardown() {
+    if (rescanTimer) clearTimeout(rescanTimer);
+    rescanTimer = null;
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    byId.clear();
+    seenKeys.clear();
+    self.WDFAnnotator.removeAllBadges();
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg || typeof msg !== "object") return;
     if (msg.type === MESSAGES.RESCAN) {
       forceRescan();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg.type === MESSAGES.ENABLED_CHANGED) {
+      const enabled = !!msg.payload?.enabled;
+      if (enabled) {
+        observeMutations();
+        forceRescan();
+      } else {
+        teardown();
+      }
       sendResponse({ ok: true });
       return true;
     }
@@ -260,11 +289,23 @@
     return false;
   });
 
-  function boot() {
+  async function boot() {
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", boot, { once: true });
       return;
     }
+    // Ask the SW for current settings before doing anything. If the user
+    // has disabled the extension we stay completely idle until ENABLED_CHANGED
+    // flips us back on. Default to enabled if the query fails (SW asleep,
+    // first install, etc.) so first-run UX is unchanged.
+    let enabled = true;
+    try {
+      const s = await chrome.runtime.sendMessage({ type: MESSAGES.GET_BASE });
+      if (s && typeof s === "object" && s.enabled === false) enabled = false;
+    } catch {
+      // ignore; treat as enabled
+    }
+    if (!enabled) return;
     observeMutations();
     requestRescan("boot");
   }

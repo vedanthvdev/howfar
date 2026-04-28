@@ -9,9 +9,19 @@
   <body>
     <main class="wrap">
       <h1>HowFar</h1>
-      <p class="lead">Save the base address every distance should be measured from.</p>
+      <p class="lead">Pick the address all distances are measured from.</p>
 
       <form id="form" class="card">
+        <label class="toggle-row" for="enabled">
+          <span class="toggle-row__main">
+            <span class="toggle-row__title">HowFar is on</span>
+            <span id="toggle-hint" class="toggle-row__hint">
+              Scanning new addresses and showing badges on every page.
+            </span>
+          </span>
+          <input id="enabled" type="checkbox" class="toggle" checked />
+        </label>
+
         <label class="field">
           <span class="field__label">Base address</span>
           <input
