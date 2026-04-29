@@ -2,37 +2,36 @@
  * HowFar — service worker.
  *
  * Owns settings, the short-lived per-(base, address, modes, units) cache,
- * orchestration of /resolve-distances calls, AND the client-side kill switch:
- * when the backend reports that the monthly budget is exhausted (HTTP 429
- * with code "quota_exhausted", or status "paused" entries), we pause all
- * fresh scans to avoid accidentally driving charges past the free tier —
- * but we still serve cache hits so already-resolved addresses keep
- * rendering distances.
+ * and direct calls to Google Maps APIs using the user's own key. No backend
+ * is required at runtime.
+ *
+ * Master kill switches, in priority order:
+ *   1. `enabled` — user toggled HowFar off; nothing scans, nothing is fetched.
+ *   2. No `apiKey` — user hasn't completed setup; we surface a "needs setup"
+ *      status to the UI and don't try to call Google.
+ *   3. Budget tripped — the user's monthly cap was reached. Cache hits keep
+ *      working; fresh addresses get a `paused` marker.
  */
 importScripts(
   "shared/types.js",
   "shared/normalize.js",
-  "shared/messages.js"
+  "shared/messages.js",
+  "shared/format.js",
+  "shared/budget-tracker.js",
+  "shared/provider-google.js"
 );
 
 const MESSAGES = self.WDFMessages;
 const STATUSES = self.WDFStatuses;
 const MODE_ORDER = self.WDFModeOrder;
 const { distanceCacheKey } = self.WDFNormalize;
+const { BudgetTracker, BudgetExceededError, DEFAULT_CAP_USD } = self.WDFBudget;
+const { buildClient, ProviderError } = self.WDFProviderGoogle;
 
-const DEFAULT_BACKEND = "http://localhost:8787";
 const DEFAULT_UNITS = "imperial";
 const DEFAULT_MODES = [...MODE_ORDER];
 const DEFAULT_ENABLED = true;
 const CACHE_TTL_MS = 15 * 60 * 1000;
-const BUDGET_POLL_ALARM = "wdf-budget-poll";
-const BUDGET_POLL_INTERVAL_MIN = 5;
-// First poll fires a little later so we don't race extension startup. 30s is
-// enough for the user to land on a real page; earlier polls before anything
-// interesting exists are wasted cycles.
-const BUDGET_POLL_INITIAL_DELAY_MIN = 0.5;
-const BUDGET_STATE_STORAGE_KEY = "wdfBudgetState";
-const ADMIN_HEADER = "X-WDF-Admin-Token";
 
 /** @type {Map<string, {value: any, expiresAt: number}>} */
 const distCache = new Map();
@@ -40,53 +39,8 @@ const distCache = new Map();
 /** @type {Map<number, {url: string, results: Array<any>}>} */
 const pageResultsByTab = new Map();
 
-/**
- * In-memory mirror of the last known budget state so UIs open instantly.
- * Hydrated from chrome.storage.local below so SW respawns (Chrome idles
- * SWs aggressively) don't drop the tripped flag between the last poll and
- * the next one.
- */
-let budgetState = {
-  tripped: false,
-  trippedReason: null,
-  estimatedUsd: 0,
-  cap: 0,
-  percent: 0,
-  counts: { geocode: 0, directions: 0 },
-  month: "",
-  reachable: true,
-  error: null,
-  lastCheckedAt: 0,
-  persistError: null,
-};
-let budgetStateHydrated = false;
-
-async function hydrateBudgetState() {
-  if (budgetStateHydrated) return;
-  budgetStateHydrated = true;
-  try {
-    const stored = await chrome.storage.local.get(BUDGET_STATE_STORAGE_KEY);
-    const saved = stored?.[BUDGET_STATE_STORAGE_KEY];
-    if (saved && typeof saved === "object") {
-      budgetState = { ...budgetState, ...saved };
-    }
-  } catch {
-    // Storage is best-effort; keep defaults on failure.
-  }
-}
-
-function persistBudgetState() {
-  // Fire-and-forget — we never want to block a response on storage.
-  chrome.storage.local
-    .set({ [BUDGET_STATE_STORAGE_KEY]: budgetState })
-    .catch((err) => {
-      console.warn("[wdf] persist budget state failed:", err);
-    });
-}
-
-// Kick off hydration immediately. It's async but callers always await it via
-// the wrapper below, so no race.
-const hydrationPromise = hydrateBudgetState();
+const budget = new BudgetTracker({ cap: DEFAULT_CAP_USD });
+const initPromise = budget.init();
 
 function cacheGet(key) {
   const hit = distCache.get(key);
@@ -116,21 +70,15 @@ async function getSettings() {
   const stored = await chrome.storage.local.get([
     "base",
     "units",
-    "backendUrl",
     "modes",
-    "adminToken",
+    "apiKey",
     "enabled",
   ]);
   return {
     base: stored.base ?? null,
     units: stored.units ?? DEFAULT_UNITS,
-    backendUrl: (stored.backendUrl ?? DEFAULT_BACKEND).replace(/\/$/, ""),
     modes: sanitizeModes(stored.modes),
-    adminToken: stored.adminToken ?? "",
-    // `enabled` is a master kill switch the user controls from the popup or
-    // options page. When false: content scripts tear down badges and stop
-    // observing, the SW refuses RESOLVE_CANDIDATES (no API spend), and the
-    // budget poller pauses. Default true so first-run UX is unchanged.
+    apiKey: typeof stored.apiKey === "string" ? stored.apiKey : "",
     enabled: stored.enabled === undefined ? DEFAULT_ENABLED : Boolean(stored.enabled),
   };
 }
@@ -140,181 +88,73 @@ async function setSettings(patch) {
 }
 
 /**
+ * True when the message originated from an extension UI page (popup, options),
+ * not from a content script. Content scripts always carry a `sender.tab`;
+ * extension pages don't. We use this to (a) refuse privileged writes from
+ * content scripts and (b) redact the apiKey from broadcast settings reads.
+ */
+function isExtensionUiSender(sender) {
+  return !sender?.tab && sender?.id === chrome.runtime.id;
+}
+
+/** Strip secrets from a settings object before sending it to a content script. */
+function redactForContentScript(settings) {
+  return {
+    base: settings.base,
+    units: settings.units,
+    modes: settings.modes,
+    enabled: settings.enabled,
+    hasApiKey: Boolean(settings.apiKey),
+  };
+}
+
+/**
+ * Build a provider client for the current API key. We construct a fresh
+ * client per request so a key change in options takes effect without
+ * needing to reload anything.
+ */
+function clientFor(apiKey) {
+  return buildClient({
+    apiKey,
+    budget,
+    format: self.WDFFormat,
+  });
+}
+
+/**
  * Tell every UI surface (popup, options) AND every content script that the
- * enabled flag changed. We address content scripts via tabs.query because
- * runtime.sendMessage doesn't reach them — only same-context listeners.
- *
- * Both sends are best-effort: tabs without our content script (chrome://,
- * about:, restricted origins) reject the message and that's fine.
+ * enabled flag changed. Both sends are best-effort: tabs without our content
+ * script (chrome://, restricted origins) reject and that's fine.
  */
 function broadcastEnabled(enabled) {
   chrome.runtime
     .sendMessage({ type: MESSAGES.ENABLED_CHANGED, payload: { enabled } })
-    .catch(() => {
-      // No popup/options open — fine.
-    });
-  chrome.tabs.query({}, (tabs) => {
-    for (const tab of tabs) {
-      if (typeof tab.id !== "number") continue;
-      chrome.tabs
-        .sendMessage(tab.id, {
-          type: MESSAGES.ENABLED_CHANGED,
-          payload: { enabled },
-        })
-        .catch(() => {
-          // Tab has no content script (chrome://, web store, etc.) — fine.
-        });
+    .catch(() => {});
+  (async () => {
+    try {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (typeof tab.id !== "number") continue;
+        chrome.tabs
+          .sendMessage(tab.id, {
+            type: MESSAGES.ENABLED_CHANGED,
+            payload: { enabled },
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // tabs.query failed — best-effort broadcast, swallow.
     }
-  });
+  })();
 }
 
 function broadcastBudget() {
   chrome.runtime
-    .sendMessage({ type: MESSAGES.BUDGET_UPDATED, payload: budgetState })
-    .catch(() => {
-      // No receivers — safe to ignore.
-    });
+    .sendMessage({ type: MESSAGES.BUDGET_UPDATED, payload: budget.usage() })
+    .catch(() => {});
 }
 
-function applyBudgetUsage(usage) {
-  budgetState = {
-    ...budgetState,
-    tripped: Boolean(usage.tripped),
-    trippedReason: usage.trippedReason ?? null,
-    estimatedUsd: Number(usage.estimatedUsd ?? 0),
-    cap: Number(usage.cap ?? 0),
-    percent: Number(usage.percent ?? 0),
-    counts: {
-      geocode: Number(usage.counts?.geocode ?? 0),
-      directions: Number(usage.counts?.directions ?? 0),
-    },
-    month: usage.month ?? "",
-    reachable: true,
-    error: null,
-    lastCheckedAt: Date.now(),
-    persistError: usage.persistError ?? null,
-  };
-  persistBudgetState();
-  broadcastBudget();
-}
-
-function markBudgetTripped(reason) {
-  budgetState = {
-    ...budgetState,
-    tripped: true,
-    trippedReason: reason ?? "Monthly budget exhausted.",
-    reachable: true,
-    error: null,
-    lastCheckedAt: Date.now(),
-  };
-  persistBudgetState();
-  broadcastBudget();
-}
-
-function markBudgetUnreachable(err) {
-  budgetState = {
-    ...budgetState,
-    reachable: false,
-    error: err?.message ?? String(err ?? "unreachable"),
-    lastCheckedAt: Date.now(),
-  };
-  persistBudgetState();
-  broadcastBudget();
-}
-
-async function pollBudget() {
-  await hydrationPromise;
-  const { backendUrl } = await getSettings();
-  try {
-    const res = await fetch(`${backendUrl}/budget`, { cache: "no-store" });
-    if (!res.ok) {
-      markBudgetUnreachable(new Error(`HTTP ${res.status}`));
-      return budgetState;
-    }
-    const usage = await res.json();
-    applyBudgetUsage(usage);
-    return budgetState;
-  } catch (err) {
-    markBudgetUnreachable(err);
-    return budgetState;
-  }
-}
-
-async function resetBudget() {
-  await hydrationPromise;
-  const { backendUrl, adminToken } = await getSettings();
-  const headers = { "Content-Type": "application/json" };
-  if (adminToken) headers[ADMIN_HEADER] = adminToken;
-  const res = await fetch(`${backendUrl}/budget/reset`, {
-    method: "POST",
-    headers,
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    let code = null;
-    try {
-      const body = await res.json();
-      if (body?.error) msg = body.error;
-      if (body?.code) code = body.code;
-    } catch {
-      // ignore
-    }
-    const err = new Error(msg);
-    err.code = code;
-    err.httpStatus = res.status;
-    throw err;
-  }
-  const usage = await res.json();
-  applyBudgetUsage(usage);
-  // Also flush the local dist cache — it may have stale results produced just
-  // before the breaker tripped.
-  distCache.clear();
-  return budgetState;
-}
-
-/**
- * Parse a fetch Response as JSON. Attaches any server-provided `code` and
- * the raw HTTP status to thrown errors so callers can distinguish
- * `quota_exhausted` from e.g. `admin_token_required` without string-matching
- * error messages.
- */
-async function readResponse(res) {
-  const text = await res.text();
-  let body = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      // non-JSON body — leave null
-    }
-  }
-  if (!res.ok) {
-    const msg = body?.error ?? `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.code = body?.code ?? null;
-    err.httpStatus = res.status;
-    err.body = body;
-    throw err;
-  }
-  return body;
-}
-
-async function resolveBaseAddress(input) {
-  const { backendUrl } = await getSettings();
-  const res = await fetch(`${backendUrl}/resolve-base`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: input }),
-  });
-  return readResponse(res);
-}
-
-/**
- * Build a "paused" placeholder result for a candidate we aren't going to
- * send to the backend. Using the dedicated status lets the UI render it
- * distinctly from generic errors.
- */
+/** Build a "paused" placeholder for a candidate we aren't going to send. */
 function pausedResult(id, reason) {
   return {
     id,
@@ -324,24 +164,42 @@ function pausedResult(id, reason) {
   };
 }
 
-async function resolveDistances(tabId, candidates) {
-  await hydrationPromise;
-  const { base, units, backendUrl, modes, enabled } = await getSettings();
+/**
+ * Build a "setup needed" placeholder for when the user hasn't pasted an
+ * API key yet. Distinct from `error` so the popup can render an actionable
+ * "Open setup" button instead of a generic failure.
+ */
+function setupNeededResult(id) {
+  return {
+    id,
+    status: STATUSES.ERROR,
+    error: "Setup needed: paste your Google Maps API key in HowFar's options.",
+    needsSetup: true,
+    modes: {},
+  };
+}
 
-  // Master kill switch. Belt-and-braces: the content script also stops
-  // scanning when disabled, but if anything slips through, refuse here.
-  // Returning empty results (rather than throwing) lets callers no-op
-  // cleanly without painting error badges.
+async function resolveDistances(tabId, candidates) {
+  await initPromise;
+  const { base, units, modes, enabled, apiKey } = await getSettings();
+
+  // 1. Master kill switch — user has HowFar off.
   if (!enabled) {
     updatePageResults(tabId, candidates, []);
     return { results: [], disabled: true };
   }
 
-  // Even when the breaker is tripped, we still serve cache hits. That
-  // keeps already-seen addresses usable during a monthly pause — only
-  // fresh addresses get marked as paused.
-  if (budgetState.tripped) {
-    const reason = budgetState.trippedReason ?? "Monthly budget exhausted.";
+  // 2. Setup not done — surface a dedicated status the popup can act on.
+  if (!apiKey) {
+    const stub = candidates.map((c) => setupNeededResult(c.id));
+    updatePageResults(tabId, candidates, stub);
+    return { results: stub, needsSetup: true };
+  }
+
+  // 3. Budget tripped — serve cache hits, mark fresh addresses as paused.
+  const usage = budget.usage();
+  if (usage.tripped) {
+    const reason = usage.trippedReason ?? "Monthly budget exhausted.";
     const results = candidates.map((c) => {
       if (base) {
         const key = distanceCacheKey(base.placeId, c.text, modes, units);
@@ -351,9 +209,10 @@ async function resolveDistances(tabId, candidates) {
       return pausedResult(c.id, reason);
     });
     updatePageResults(tabId, candidates, results);
-    return { results, paused: true, budget: budgetState };
+    return { results, paused: true, budget: budget.usage() };
   }
 
+  // 4. No base configured yet — bail with a clear error per candidate.
   if (!base) {
     const noBase = candidates.map((c) => ({
       id: c.id,
@@ -380,87 +239,108 @@ async function resolveDistances(tabId, candidates) {
   });
 
   if (toFetch.length > 0) {
-    let backendResults = [];
-    let serverPaused = false;
+    const provider = clientFor(apiKey);
+    let pauseReason = null;
+    let resolved = [];
     try {
-      const res = await fetch(`${backendUrl}/resolve-distances`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          base: {
-            lat: base.lat,
-            lng: base.lng,
-            placeId: base.placeId,
-            formattedAddress: base.formattedAddress,
-          },
-          modes,
-          units,
-          candidates: toFetch.map((c) => ({ id: c.id, text: c.text })),
-        }),
-      });
-      const parsed = await readResponse(res);
-      backendResults = Array.isArray(parsed?.results) ? parsed.results : [];
-      serverPaused = Boolean(parsed?.paused);
-      if (parsed?.budget) applyBudgetUsage(parsed.budget);
+      resolved = await provider.resolveCandidates(toFetch);
     } catch (err) {
-      if (err?.code === "quota_exhausted") {
-        markBudgetTripped(err.message);
-        // The 429 payload carries `results` with paused markers — use those
-        // directly if present, otherwise synthesize.
-        const body = err.body;
-        if (body && Array.isArray(body.results)) {
-          backendResults = body.results;
-          serverPaused = true;
-        } else {
-          backendResults = toFetch.map((c) => pausedResult(c.id, err.message));
-        }
+      if (err instanceof BudgetExceededError) {
+        pauseReason = err.message;
       } else {
         const message = err?.message ?? String(err);
-        backendResults = toFetch.map((c) => ({
-          id: c.id,
-          status: STATUSES.ERROR,
-          error: message,
-          modes: {},
-        }));
+        for (let j = 0; j < toFetch.length; j++) {
+          const idx = toFetchIdx[j];
+          results[idx] = {
+            id: toFetch[j].id,
+            status: STATUSES.ERROR,
+            error: message,
+            modes: {},
+          };
+        }
+        resolved = [];
       }
     }
 
-    // Align backend results to requests by `id`, not by position. The
-    // backend is allowed to return them out of order.
-    const byId = new Map();
-    for (const r of backendResults) {
-      if (r && typeof r.id === "string") byId.set(r.id, r);
-    }
-    for (let j = 0; j < toFetch.length; j++) {
-      const idx = toFetchIdx[j];
-      const c = toFetch[j];
-      const r =
-        byId.get(c.id) ??
-        (serverPaused
-          ? pausedResult(
-              c.id,
-              budgetState.trippedReason ?? "Monthly budget exhausted."
-            )
-          : {
-              id: c.id,
+    if (resolved.length > 0 && !pauseReason) {
+      let distances = [];
+      try {
+        distances = await provider.getDistances(base, resolved, modes, units);
+      } catch (err) {
+        if (err instanceof BudgetExceededError) {
+          pauseReason = err.message;
+        } else {
+          const message = err?.message ?? String(err);
+          for (let j = 0; j < toFetch.length; j++) {
+            const idx = toFetchIdx[j];
+            results[idx] = {
+              id: toFetch[j].id,
               status: STATUSES.ERROR,
-              error: "missing from backend response",
+              error: message,
               modes: {},
-            });
-      results[idx] = r;
-      // Only cache successful resolutions.
-      if (r.status === STATUSES.OK || r.status === STATUSES.AMBIGUOUS) {
-        const key = distanceCacheKey(base.placeId, c.text, modes, units);
-        cacheSet(key, r);
+            };
+          }
+        }
+      }
+
+      // Align by id; the provider preserves it but be defensive.
+      const byId = new Map();
+      for (const d of distances) {
+        if (d && typeof d.id === "string") byId.set(d.id, d);
+      }
+      for (let j = 0; j < toFetch.length; j++) {
+        const idx = toFetchIdx[j];
+        const c = toFetch[j];
+        const r =
+          byId.get(c.id) ??
+          (pauseReason
+            ? pausedResult(c.id, pauseReason)
+            : {
+                id: c.id,
+                status: STATUSES.ERROR,
+                error: "no result",
+                modes: {},
+              });
+        results[idx] = r;
+        if (r.status === STATUSES.OK || r.status === STATUSES.AMBIGUOUS) {
+          const key = distanceCacheKey(base.placeId, c.text, modes, units);
+          cacheSet(key, r);
+        }
+      }
+    }
+
+    // Post-batch trip check: if a parallel leg flipped the breaker partway
+    // through, fill any unfilled slots with paused.
+    const trippedNow = budget.usage().tripped;
+    if (trippedNow && !pauseReason) {
+      pauseReason = budget.usage().trippedReason ?? "Monthly budget exhausted.";
+    }
+    if (pauseReason) {
+      for (let j = 0; j < toFetch.length; j++) {
+        const idx = toFetchIdx[j];
+        if (results[idx] === undefined) {
+          results[idx] = pausedResult(toFetch[j].id, pauseReason);
+        }
+      }
+    }
+
+    // Defend against holes (shouldn't happen, but the UI dies on undefined).
+    for (let i = 0; i < results.length; i++) {
+      if (results[i] === undefined) {
+        results[i] = {
+          id: candidates[i].id,
+          status: STATUSES.ERROR,
+          error: "no result",
+          modes: {},
+        };
       }
     }
   }
 
   updatePageResults(tabId, candidates, results);
-  // Opportunistically refresh budget every time we hit the backend so the UI
-  // can show live usage without waiting for the next poll tick.
-  pollBudget().catch(() => {});
-  return { results, modes, budget: budgetState };
+  // Push budget update so the popup's progress bar stays live.
+  broadcastBudget();
+  return { results, modes, budget: budget.usage() };
 }
 
 function updatePageResults(tabId, candidates, results) {
@@ -482,30 +362,47 @@ function updatePageResults(tabId, candidates, results) {
       type: MESSAGES.PAGE_RESULTS_UPDATED,
       payload: { tabId, results: Array.from(byIdx.values()) },
     })
-    .catch(() => {
-      // popup may not be open; safe to ignore
-    });
+    .catch(() => {});
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   pageResultsByTab.delete(tabId);
 });
 
-/** Periodic poll via chrome.alarms — survives SW restarts. */
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(BUDGET_POLL_ALARM, {
-    delayInMinutes: BUDGET_POLL_INITIAL_DELAY_MIN,
-    periodInMinutes: BUDGET_POLL_INTERVAL_MIN,
-  });
-});
-chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create(BUDGET_POLL_ALARM, {
-    delayInMinutes: BUDGET_POLL_INITIAL_DELAY_MIN,
-    periodInMinutes: BUDGET_POLL_INTERVAL_MIN,
-  });
-});
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === BUDGET_POLL_ALARM) pollBudget().catch(() => {});
+/**
+ * One-time migration: drop storage keys from previous architectures
+ * (v1 used a backend; an earlier budget tracker used `wdfBudgetState`).
+ * Cheap to run on every install/update and removes dead keys that would
+ * otherwise mislead future maintainers grepping chrome.storage.
+ */
+async function migrateStorage() {
+  try {
+    await chrome.storage.local.remove(["backendUrl", "adminToken", "wdfBudgetState"]);
+  } catch {
+    // Storage failures aren't worth surfacing — the dead keys are harmless.
+  }
+}
+
+/**
+ * Open the options page on first install so the user lands directly in the
+ * setup wizard. We deliberately don't open it on `update` events — that
+ * would be obnoxious for existing users on every minor release.
+ */
+chrome.runtime.onInstalled.addListener((details) => {
+  void migrateStorage();
+  if (details.reason !== "install") return;
+  // Best-effort: if openOptionsPage rejects (Chrome quirk), fall back to
+  // opening the URL directly.
+  const fallback = () => {
+    const url = chrome.runtime.getURL("ui/options.html");
+    chrome.tabs.create({ url }).catch(() => {});
+  };
+  try {
+    const p = chrome.runtime.openOptionsPage();
+    if (p && typeof p.catch === "function") p.catch(fallback);
+  } catch {
+    fallback();
+  }
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -515,9 +412,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tabId = sender.tab?.id;
     const payload = msg.payload ?? {};
     if (tabId && typeof payload.url === "string") {
+      // SPA navigations reuse the same tabId but switch URL. Drop stale
+      // results so the popup shows only the current page's addresses.
+      const existing = pageResultsByTab.get(tabId);
+      const sameUrl = existing?.url === payload.url;
       pageResultsByTab.set(tabId, {
         url: payload.url,
-        results: pageResultsByTab.get(tabId)?.results ?? [],
+        results: sameUrl ? existing.results : [],
       });
     }
     resolveDistances(tabId, payload.candidates ?? [])
@@ -538,33 +439,68 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === MESSAGES.GET_BASE) {
     (async () => {
-      await hydrationPromise;
+      await initPromise;
       const s = await getSettings();
-      sendResponse({ ...s, budget: budgetState });
+      // Content scripts don't get the actual key — they only need to know
+      // whether setup is complete. Extension UI pages (popup, options) get
+      // the full settings so the form can pre-fill is unchanged.
+      const safe = isExtensionUiSender(sender)
+        ? { ...s, hasApiKey: Boolean(s.apiKey) }
+        : redactForContentScript(s);
+      sendResponse({ ...safe, budget: budget.usage() });
     })().catch((err) => sendResponse({ error: err?.message ?? String(err) }));
     return true;
   }
 
-  if (msg.type === MESSAGES.SET_BASE) {
+  if (msg.type === MESSAGES.GET_API_KEY) {
+    // Content scripts have no business reading the key.
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
     (async () => {
       try {
-        await hydrationPromise;
+        await initPromise;
+        const { apiKey } = await getSettings();
+        sendResponse({ ok: true, apiKey: apiKey ?? "" });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MESSAGES.SET_BASE) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
+    (async () => {
+      try {
+        await initPromise;
         const addr = String(msg.payload?.address ?? "").trim();
         const units = msg.payload?.units;
-        const backendUrl = msg.payload?.backendUrl;
         const modes = msg.payload?.modes;
-        const adminToken = msg.payload?.adminToken;
-        if (backendUrl !== undefined) await setSettings({ backendUrl });
-        if (units === "metric" || units === "imperial") await setSettings({ units });
-        if (typeof adminToken === "string") {
-          await setSettings({ adminToken: adminToken.trim() });
+        if (units === "metric" || units === "imperial") {
+          await setSettings({ units });
         }
         if (Array.isArray(modes)) {
           await setSettings({ modes: sanitizeModes(modes) });
           distCache.clear();
         }
         if (addr) {
-          const base = await resolveBaseAddress(addr);
+          const { apiKey } = await getSettings();
+          if (!apiKey) {
+            sendResponse({
+              ok: false,
+              error:
+                "Paste your Google Maps API key first so we can geocode the base address.",
+              code: "needs_setup",
+            });
+            return;
+          }
+          const provider = clientFor(apiKey);
+          const base = await provider.resolveBaseAddress(addr);
           await setSettings({ base });
           distCache.clear();
           sendResponse({ ok: true, base });
@@ -572,11 +508,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         sendResponse({ ok: true });
       } catch (err) {
-        if (err?.code === "quota_exhausted") markBudgetTripped(err.message);
+        if (err instanceof BudgetExceededError) {
+          broadcastBudget();
+        }
         sendResponse({
           ok: false,
           error: err?.message ?? String(err),
-          code: err?.code,
+          code: err?.code ?? (err instanceof ProviderError ? err.kind : null),
         });
       }
     })();
@@ -584,22 +522,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === MESSAGES.CLEAR_BASE) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
     (async () => {
-      await chrome.storage.local.remove("base");
-      distCache.clear();
-      sendResponse({ ok: true });
+      try {
+        await chrome.storage.local.remove("base");
+        distCache.clear();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MESSAGES.SET_API_KEY) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
+    (async () => {
+      try {
+        await initPromise;
+        const apiKey = String(msg.payload?.apiKey ?? "").trim();
+        await setSettings({ apiKey });
+        // The new key invalidates anything we resolved with the old one.
+        distCache.clear();
+        // Tell any open extension pages (popup, options) that setup state
+        // changed so they can flip out of / into the "Setup needed" view
+        // without waiting for the user to reopen them.
+        chrome.runtime
+          .sendMessage({
+            type: MESSAGES.API_KEY_CHANGED,
+            payload: { hasApiKey: Boolean(apiKey) },
+          })
+          .catch(() => {});
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MESSAGES.VALIDATE_KEY) {
+    (async () => {
+      try {
+        const apiKey = String(msg.payload?.apiKey ?? "").trim();
+        if (!apiKey) {
+          sendResponse({ ok: false, reason: "Key is empty." });
+          return;
+        }
+        // Build a budget-less client so the validation call doesn't count
+        // against the user's tracker.
+        const probe = buildClient({
+          apiKey,
+          budget: undefined,
+          format: self.WDFFormat,
+        });
+        const result = await probe.validateKey();
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message ?? String(err) });
+      }
     })();
     return true;
   }
 
   if (msg.type === MESSAGES.SET_ENABLED) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
     (async () => {
       try {
-        await hydrationPromise;
+        await initPromise;
         const enabled = Boolean(msg.payload?.enabled);
         await setSettings({ enabled });
-        // Cache survives toggles — distances haven't changed. But broadcast
-        // immediately so the active tab can tear down or paint badges.
         broadcastEnabled(enabled);
         sendResponse({ ok: true, enabled });
       } catch (err) {
@@ -609,49 +610,80 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === MESSAGES.SET_BUDGET_CAP) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
+    (async () => {
+      try {
+        await initPromise;
+        const cap = Number(msg.payload?.cap);
+        if (!Number.isFinite(cap) || cap <= 0) {
+          sendResponse({ ok: false, error: "Cap must be a positive number." });
+          return;
+        }
+        await budget.setCap(cap);
+        broadcastBudget();
+        sendResponse({ ok: true, budget: budget.usage() });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === MESSAGES.GET_PAGE_RESULTS) {
     (async () => {
-      await hydrationPromise;
-      const tabId = msg.payload?.tabId ?? sender.tab?.id;
-      if (typeof tabId !== "number") {
-        sendResponse({ results: [], budget: budgetState });
-        return;
+      try {
+        await initPromise;
+        const tabId = msg.payload?.tabId ?? sender.tab?.id;
+        if (typeof tabId !== "number") {
+          sendResponse({ results: [], budget: budget.usage() });
+          return;
+        }
+        const entry = pageResultsByTab.get(tabId);
+        sendResponse({
+          url: entry?.url ?? "",
+          results: entry?.results ?? [],
+          budget: budget.usage(),
+        });
+      } catch (err) {
+        sendResponse({ error: err?.message ?? String(err), results: [] });
       }
-      const entry = pageResultsByTab.get(tabId);
-      sendResponse({
-        url: entry?.url ?? "",
-        results: entry?.results ?? [],
-        budget: budgetState,
-      });
     })();
     return true;
   }
 
   if (msg.type === MESSAGES.GET_BUDGET) {
     (async () => {
-      await hydrationPromise;
-      const fresh = msg.payload?.force
-        ? await pollBudget()
-        : budgetState.lastCheckedAt
-        ? budgetState
-        : await pollBudget();
-      sendResponse(fresh);
+      try {
+        await initPromise;
+        sendResponse(budget.usage());
+      } catch (err) {
+        sendResponse({ error: err?.message ?? String(err) });
+      }
     })();
     return true;
   }
 
   if (msg.type === MESSAGES.RESET_BUDGET) {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "forbidden" });
+      return true;
+    }
     (async () => {
       try {
-        const fresh = await resetBudget();
-        sendResponse({ ok: true, budget: fresh });
+        await initPromise;
+        await budget.reset();
+        // A reset typically follows a tripped breaker; clear the dist cache
+        // too so any "paused" results we cached during the pause don't
+        // continue to render.
+        distCache.clear();
+        broadcastBudget();
+        sendResponse({ ok: true, budget: budget.usage() });
       } catch (err) {
-        sendResponse({
-          ok: false,
-          error: err?.message ?? String(err),
-          code: err?.code,
-          httpStatus: err?.httpStatus,
-        });
+        sendResponse({ ok: false, error: err?.message ?? String(err) });
       }
     })();
     return true;

@@ -9,9 +9,158 @@
   <body>
     <main class="wrap">
       <h1>HowFar</h1>
-      <p class="lead">Pick the address all distances are measured from.</p>
 
-      <form id="form" class="card">
+      <!--
+        Setup wizard. Shown when the user has no API key yet (fresh install).
+        Stays in DOM but hidden once setup is complete; can be re-triggered
+        from the regular form via "Run setup again".
+      -->
+      <section id="wizard" class="wizard" hidden>
+        <ol class="wizard__progress" role="tablist">
+          <li class="wizard__dot" data-step="1">1</li>
+          <li class="wizard__dot" data-step="2">2</li>
+          <li class="wizard__dot" data-step="3">3</li>
+          <li class="wizard__dot" data-step="4">4</li>
+        </ol>
+
+        <article class="wizard__panel" data-step="1">
+          <h2>Welcome to HowFar</h2>
+          <p class="wizard__lead">
+            HowFar adds walking, driving, and cycling times next to every
+            address it spots on the web. It uses Google Maps under the hood,
+            calling Google directly from your browser with a key you control.
+          </p>
+          <ul class="wizard__list">
+            <li>Your key stays on this device — we don&rsquo;t have a server.</li>
+            <li>Google gives you $200&nbsp;/&nbsp;month of free credit.</li>
+            <li>Setup takes about 5 minutes.</li>
+          </ul>
+          <div class="wizard__actions">
+            <button type="button" class="btn btn--primary" data-go="2">Get started</button>
+          </div>
+        </article>
+
+        <article class="wizard__panel" data-step="2" hidden>
+          <h2>Get a Google Maps API key</h2>
+          <p class="wizard__lead">
+            You&rsquo;ll need a key from Google Cloud. It&rsquo;s free for the
+            first $200 of usage every month — far more than HowFar will ever
+            spend on personal browsing.
+          </p>
+          <ol class="wizard__steps">
+            <li>
+              <a
+                class="btn btn--ghost"
+                href="https://console.cloud.google.com/google/maps-apis/start"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Open Google Cloud Console ↗</a>
+              <p class="wizard__hint">Sign in (or create a Google account).</p>
+            </li>
+            <li>
+              <strong>Create a project.</strong>
+              <p class="wizard__hint">Anything you call it works. Free tier — no credit card needed for the first 90 days.</p>
+            </li>
+            <li>
+              <strong>Enable these two APIs:</strong>
+              <ul class="wizard__sub">
+                <li>Geocoding API</li>
+                <li>Directions API</li>
+              </ul>
+              <p class="wizard__hint">
+                Search for each by name in the API Library, then click <em>Enable</em>.
+              </p>
+            </li>
+            <li>
+              <strong>Create the key.</strong>
+              <p class="wizard__hint">
+                APIs &amp; Services → Credentials → <em>Create Credentials</em> → <em>API key</em>.
+                Copy the value Google shows you.
+              </p>
+            </li>
+            <li>
+              <strong>Restrict the key</strong> (recommended).
+              <p class="wizard__hint">
+                Click <em>Edit API key</em>. Under <em>API restrictions</em>, choose
+                <em>Restrict key</em> and select Geocoding API and Directions API.
+                That&rsquo;s it — leave application restrictions on <em>None</em>.
+              </p>
+            </li>
+          </ol>
+          <div class="wizard__actions">
+            <button type="button" class="btn btn--ghost" data-go="1">Back</button>
+            <button type="button" class="btn btn--primary" data-go="3">I have a key</button>
+          </div>
+        </article>
+
+        <article class="wizard__panel" data-step="3" hidden>
+          <h2>Paste your key</h2>
+          <p class="wizard__lead">
+            We&rsquo;ll do a one-call test against Google to confirm it works
+            before saving anything.
+          </p>
+          <label class="field">
+            <span class="field__label">Google Maps API key</span>
+            <input
+              id="wizard-key"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="AIza…"
+              required
+            />
+            <span class="field__hint">
+              Stored in your browser&rsquo;s local extension storage, never sent
+              anywhere except <code>maps.googleapis.com</code>.
+            </span>
+          </label>
+          <p id="wizard-key-status" class="status" aria-live="polite"></p>
+          <div class="wizard__actions">
+            <button type="button" class="btn btn--ghost" data-go="2">Back</button>
+            <button id="wizard-key-save" type="button" class="btn btn--primary">
+              Validate &amp; save
+            </button>
+          </div>
+        </article>
+
+        <article class="wizard__panel" data-step="4" hidden>
+          <h2>Set your home address</h2>
+          <p class="wizard__lead">
+            Every distance HowFar shows is measured from this address.
+          </p>
+          <label class="field">
+            <span class="field__label">Base address</span>
+            <input
+              id="wizard-address"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="221B Baker Street, London"
+              required
+            />
+            <span class="field__hint">
+              We&rsquo;ll geocode it once and store the canonical address +
+              coordinates locally.
+            </span>
+          </label>
+          <p id="wizard-address-status" class="status" aria-live="polite"></p>
+          <div class="wizard__actions">
+            <button type="button" class="btn btn--ghost" data-go="3">Back</button>
+            <button id="wizard-address-save" type="button" class="btn btn--primary">
+              Save &amp; finish
+            </button>
+          </div>
+        </article>
+      </section>
+
+      <!--
+        Standard options form. Hidden during the first-run wizard; revealed
+        once setup is complete. Also reachable for users who already have a
+        key configured.
+      -->
+      <form id="form" class="card" hidden>
+        <p class="lead">Pick the address all distances are measured from.</p>
+
         <label class="toggle-row" for="enabled">
           <span class="toggle-row__main">
             <span class="toggle-row__title">HowFar is on</span>
@@ -67,32 +216,17 @@
         </fieldset>
 
         <label class="field">
-          <span class="field__label">Backend URL</span>
+          <span class="field__label">Google Maps API key</span>
           <input
-            id="backend"
-            type="url"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="http://localhost:8787"
-          />
-          <span class="field__hint">
-            Points at the companion API. Defaults to <code>http://localhost:8787</code>.
-          </span>
-        </label>
-
-        <label class="field">
-          <span class="field__label">Admin token</span>
-          <input
-            id="admin-token"
+            id="api-key"
             type="password"
             autocomplete="off"
             spellcheck="false"
-            placeholder="auto-filled on localhost"
+            placeholder="AIza…"
           />
           <span class="field__hint">
-            Needed to reset the monthly quota. On localhost the extension
-            can fetch it automatically; otherwise paste the value of
-            <code>BUDGET_ADMIN_TOKEN</code> from your <code>.env</code>.
+            Used to call Geocoding + Directions directly from the extension.
+            <a id="setup-again" href="#">Run setup again</a> if you need help.
           </span>
         </label>
 
@@ -110,11 +244,11 @@
         <div id="current-coords" class="coords"></div>
       </section>
 
-      <section id="budget" class="card card--dim">
+      <section id="budget" class="card card--dim" hidden>
         <h2>Free-tier safeguard</h2>
         <p class="field__hint" id="budget-blurb">
-          The backend stops calling Google once estimated spend reaches your
-          configured monthly cap.
+          HowFar stops calling Google once estimated spend reaches your
+          configured monthly cap, so a runaway page can&rsquo;t blow through your free credit.
         </p>
         <div id="budget-tripped" class="alert" hidden>
           <strong>Scanning paused.</strong>
@@ -131,12 +265,23 @@
           </div>
           <div id="usage-counts" class="usage__counts">—</div>
         </div>
+        <label class="field cap-field">
+          <span class="field__label">Monthly cap (USD)</span>
+          <input
+            id="budget-cap"
+            type="number"
+            min="1"
+            step="1"
+            placeholder="180"
+          />
+          <span class="field__hint">
+            Default is $180 (~90% of Google&rsquo;s $200 free tier).
+          </span>
+        </label>
         <div class="actions">
-          <button id="budget-reset" type="button" class="btn">
-            Reset monthly quota
-          </button>
-          <button id="budget-refresh" type="button" class="btn btn--ghost">
-            Refresh
+          <button id="budget-save-cap" type="button" class="btn">Save cap</button>
+          <button id="budget-reset" type="button" class="btn btn--ghost">
+            Reset monthly counter
           </button>
         </div>
         <p id="budget-status" class="status" aria-live="polite"></p>

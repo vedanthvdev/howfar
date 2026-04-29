@@ -91,6 +91,23 @@ html, body {
 .disabled__title { font-weight: 700; color: var(--fg); margin-bottom: 2px; }
 .disabled__msg { font-size: 12px; line-height: 1.4; }
 
+.setup {
+  padding: 16px 14px;
+  background: var(--accent-weak);
+  border-bottom: 1px solid #b9e0cd;
+  color: #084d3c;
+  text-align: center;
+}
+.setup__title { font-weight: 700; color: #084d3c; margin-bottom: 4px; }
+.setup__msg { margin: 0 0 10px; font-size: 12px; line-height: 1.45; }
+.setup .btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.setup .btn--primary:hover { background: #0b6e58; }
+
 .base {
   padding: 8px 14px;
   border-bottom: 1px solid var(--line);

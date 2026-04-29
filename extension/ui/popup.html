@@ -33,12 +33,21 @@
       </div>
     </section>
 
+    <section id="setup" class="setup" hidden role="status">
+      <div class="setup__title">Setup needed</div>
+      <p class="setup__msg">
+        Paste your Google Maps API key (free) and set a base address before
+        HowFar can show distances.
+      </p>
+      <button id="setup-go" type="button" class="btn btn--primary">Open setup</button>
+    </section>
+
     <section id="base" class="base" hidden>
       <div class="base__label">Base</div>
       <div id="base-address" class="base__addr"></div>
     </section>
 
-    <section id="empty" class="empty">
+    <section id="empty" class="empty" hidden>
       <p>Set your base address in options to get started.</p>
       <button id="open-options" type="button" class="btn">Open options</button>
     </section>

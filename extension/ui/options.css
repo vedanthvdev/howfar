@@ -130,7 +130,9 @@ h1 {
 }
 
 input[type="text"],
-input[type="url"] {
+input[type="url"],
+input[type="password"],
+input[type="number"] {
   width: 100%;
   padding: 9px 11px;
   border: 1px solid var(--line);
@@ -139,7 +141,9 @@ input[type="url"] {
   font: inherit;
 }
 input[type="text"]:focus,
-input[type="url"]:focus {
+input[type="url"]:focus,
+input[type="password"]:focus,
+input[type="number"]:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(14, 134, 106, 0.18);
@@ -246,4 +250,122 @@ fieldset.field {
   margin-top: 4px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.cap-field {
+  margin-top: 14px;
+  margin-bottom: 8px;
+}
+.cap-field input { max-width: 140px; }
+
+/* --- First-run setup wizard ------------------------------------------- */
+
+.wizard {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px 28px 24px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.wizard__progress {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 0 0 22px;
+  padding: 0;
+}
+.wizard__dot {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #eef0f3;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.wizard__dot + .wizard__dot::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: 50%;
+  width: 12px;
+  height: 2px;
+  background: #e5e7eb;
+}
+.wizard__dot.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+.wizard__dot.is-done {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
+.wizard__panel h2 {
+  font-size: 18px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+  margin: 0 0 8px;
+}
+
+.wizard__lead {
+  color: var(--muted);
+  margin: 0 0 16px;
+  line-height: 1.55;
+}
+
+.wizard__list {
+  margin: 0 0 18px;
+  padding: 0 0 0 18px;
+  color: var(--fg);
+}
+.wizard__list li {
+  margin: 4px 0;
+}
+
+.wizard__steps {
+  margin: 0 0 18px;
+  padding: 0 0 0 18px;
+}
+.wizard__steps > li {
+  margin-bottom: 16px;
+}
+.wizard__steps strong {
+  display: block;
+  margin-bottom: 4px;
+}
+.wizard__sub {
+  margin: 6px 0 4px;
+  padding-left: 18px;
+}
+.wizard__sub li {
+  margin: 2px 0;
+}
+.wizard__hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.wizard__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+}
+.wizard__actions .btn--ghost {
+  margin-right: auto;
+}
+.wizard__panel[data-step="1"] .wizard__actions {
+  justify-content: flex-end;
 }

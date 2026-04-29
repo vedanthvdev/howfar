@@ -3,8 +3,8 @@
   "name": "HowFar",
   "version": "0.1.0",
   "description": "How far is every address on this page from home? Walking, driving, and cycling times next to each one.",
-  "permissions": ["storage", "activeTab", "scripting", "alarms"],
-  "host_permissions": ["http://localhost:8787/*"],
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://maps.googleapis.com/*"],
   "background": {
     "service_worker": "service-worker.js"
   },
