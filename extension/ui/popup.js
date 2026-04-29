@@ -19,26 +19,51 @@
   const enabledInput = document.getElementById("enabled");
   const toggleLabel = document.getElementById("toggle-label");
   const disabledSection = document.getElementById("disabled");
+  const setupSection = document.getElementById("setup");
+  const setupGoBtn = document.getElementById("setup-go");
 
   // Tracks the current `enabled` flag in this popup. Affects which UI
   // sections render and whether the rescan button is interactive (disabled
   // state outranks the budget-paused state — there's nothing to rescan if
   // we aren't scanning).
   let enabledState = true;
+  // Tracks whether the user has finished setup (API key configured).
+  // Setup-needed state outranks both base-empty and disabled — nothing
+  // works without a key.
+  let needsSetup = false;
 
   function renderEnabled(enabled) {
     enabledState = !!enabled;
     enabledInput.checked = enabledState;
     toggleLabel.textContent = enabledState ? "On" : "Off";
-    disabledSection.hidden = enabledState;
+    // The disabled banner only makes sense once setup is complete. Before
+    // that, the setup banner is the only thing we want to show.
+    disabledSection.hidden = enabledState || needsSetup;
     if (!enabledState) {
-      // Hide everything that depends on scanning when we're off — the user
-      // doesn't need to see stale results or the empty-state nag.
       listSection.hidden = true;
       pausedSection.hidden = true;
       rescanBtn.disabled = true;
     } else {
-      rescanBtn.disabled = false;
+      rescanBtn.disabled = needsSetup;
+    }
+  }
+
+  function renderSetupNeeded(flag) {
+    needsSetup = !!flag;
+    setupSection.hidden = !needsSetup;
+    if (needsSetup) {
+      // Setup is the only meaningful thing the user can do. Suppress the
+      // disabled / paused / empty / list / base sections so the popup is
+      // a clean call-to-action.
+      disabledSection.hidden = true;
+      pausedSection.hidden = true;
+      emptySection.hidden = true;
+      listSection.hidden = true;
+      baseSection.hidden = true;
+      rescanBtn.disabled = true;
+      enabledInput.disabled = true;
+    } else {
+      enabledInput.disabled = false;
     }
   }
 
@@ -48,32 +73,35 @@
   }
 
   function renderBudget(budget) {
-    // When the user has disabled the extension, suppress the budget-paused
-    // chrome entirely — "off" is the dominant state and we don't want to
-    // confuse users by also flashing a free-tier banner. The footer summary
-    // is still informative (it shows current spend) so we keep it.
-    if (!budget) {
-      if (enabledState) pausedSection.hidden = true;
+    // Setup-needed and disabled states both suppress budget chrome entirely.
+    if (needsSetup || !enabledState || !budget) {
+      pausedSection.hidden = true;
       budgetSummary.hidden = true;
-      if (enabledState) rescanBtn.disabled = false;
       return;
     }
-    if (budget.tripped && enabledState) {
+    if (budget.tripped) {
       pausedSection.hidden = false;
       pausedMsg.textContent =
         budget.trippedReason ||
         "Scanning paused to keep you under your monthly Google Maps budget.";
       rescanBtn.disabled = true;
-    } else if (enabledState) {
+    } else {
       pausedSection.hidden = true;
       rescanBtn.disabled = false;
     }
-    if (budget.cap > 0 && budget.lastCheckedAt) {
+    if (budget.cap > 0 && budget.month) {
       budgetSummary.hidden = false;
-      budgetSummary.textContent = `${fmtUsd(budget.estimatedUsd)} / ${fmtUsd(budget.cap)} this month`;
+      // Persistence failures silently undercount the cap; surface that
+      // inline so the user can open options and investigate before they
+      // overshoot Google's free tier.
+      const persistFlag = budget.persistError ? " ⚠ usage may be undercounted" : "";
+      budgetSummary.textContent = `${fmtUsd(budget.estimatedUsd)} / ${fmtUsd(budget.cap)} this month${persistFlag}`;
       budgetSummary.className = "ftr__budget";
-      if (budget.tripped) budgetSummary.classList.add("ftr__budget--err");
-      else if (budget.percent >= 80) budgetSummary.classList.add("ftr__budget--warn");
+      if (budget.tripped || budget.persistError) {
+        budgetSummary.classList.add("ftr__budget--err");
+      } else if (budget.percent >= 80) {
+        budgetSummary.classList.add("ftr__budget--warn");
+      }
     } else {
       budgetSummary.hidden = true;
     }
@@ -200,9 +228,23 @@
   }
 
   async function loadBase() {
-    const response = await chrome.runtime.sendMessage({ type: MESSAGES.GET_BASE });
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({ type: MESSAGES.GET_BASE });
+    } catch (err) {
+      // SW being recycled (extension update, sleep/wake) or in a transient
+      // bad state. Surface a friendly status instead of leaving the popup
+      // half-rendered, and let init's retry-once policy give us another shot.
+      statusEl.textContent = "Reconnecting…";
+      throw err;
+    }
+    // Setup gate runs first — it suppresses everything else when active.
+    // Trust hasApiKey from the SW; the actual key is no longer in the
+    // payload (would have been a content-script-leak vector).
+    renderSetupNeeded(!response?.hasApiKey);
     renderEnabled(response?.enabled !== false);
     renderBudget(response?.budget);
+    if (needsSetup) return false;
     if (response?.base) {
       baseSection.hidden = false;
       baseAddressEl.textContent = response.base.formattedAddress;
@@ -215,22 +257,35 @@
   }
 
   async function loadResults() {
-    if (!enabledState) return;
+    if (!enabledState || needsSetup) return;
     const tab = await getActiveTab();
     if (!tab?.id) return;
-    const response = await chrome.runtime.sendMessage({
-      type: MESSAGES.GET_PAGE_RESULTS,
-      payload: { tabId: tab.id },
-    });
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: MESSAGES.GET_PAGE_RESULTS,
+        payload: { tabId: tab.id },
+      });
+    } catch {
+      // SW transient unreachable; the next PAGE_RESULTS_UPDATED broadcast
+      // (or a manual rescan) will repopulate. No need to surface noise here.
+      return;
+    }
     renderBudget(response?.budget);
     render(response?.results ?? []);
   }
 
   async function refreshBudget() {
-    const budget = await chrome.runtime.sendMessage({
-      type: MESSAGES.GET_BUDGET,
-      payload: { force: true },
-    });
+    if (needsSetup) return;
+    let budget;
+    try {
+      budget = await chrome.runtime.sendMessage({
+        type: MESSAGES.GET_BUDGET,
+        payload: { force: true },
+      });
+    } catch {
+      return;
+    }
     renderBudget(budget);
   }
 
@@ -250,22 +305,50 @@
     }, 400);
   });
 
+  // `chrome.runtime.openOptionsPage()` occasionally rejects with
+  // "Could not create an options page" — most commonly when a previous
+  // options tab is mid-close, the extension was just reloaded, or two clicks
+  // race. The documented workaround is to fall back to opening the options
+  // URL directly via `tabs.create`. We always go through this helper so the
+  // popup never surfaces an uncaught promise error.
+  function openOptions() {
+    const fallback = () => {
+      const url = chrome.runtime.getURL("ui/options.html");
+      chrome.tabs.create({ url }).catch(() => {});
+    };
+    try {
+      const p = chrome.runtime.openOptionsPage();
+      if (p && typeof p.catch === "function") p.catch(fallback);
+    } catch {
+      fallback();
+    }
+  }
+
   document.addEventListener("click", (e) => {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
     if (t.id === "open-options" || t.getAttribute("data-action") === "open-options") {
       e.preventDefault();
-      chrome.runtime.openOptionsPage();
+      openOptions();
     }
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === MESSAGES.PAGE_RESULTS_UPDATED) {
-      loadResults();
+      loadResults().catch(() => {});
     } else if (msg?.type === MESSAGES.BUDGET_UPDATED) {
       renderBudget(msg.payload);
     } else if (msg?.type === MESSAGES.ENABLED_CHANGED) {
       renderEnabled(msg.payload?.enabled !== false);
+    } else if (msg?.type === MESSAGES.API_KEY_CHANGED) {
+      // Setup completed (or the key got cleared) in another extension page.
+      // Refetch state so the popup flips out of / into "Setup needed" without
+      // the user having to close and reopen it.
+      loadBase()
+        .then((hasBase) => {
+          if (hasBase) return loadResults();
+        })
+        .catch(() => {});
     }
   });
 
@@ -273,10 +356,18 @@
     const enabled = enabledInput.checked;
     // Optimistic flip so the toggle feels instant even on a slow SW wakeup.
     renderEnabled(enabled);
-    const response = await chrome.runtime.sendMessage({
-      type: MESSAGES.SET_ENABLED,
-      payload: { enabled },
-    });
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: MESSAGES.SET_ENABLED,
+        payload: { enabled },
+      });
+    } catch {
+      // SW is sleeping/restarting and the port closed before responding.
+      // Roll back the optimistic flip — storage was not updated.
+      renderEnabled(!enabled);
+      return;
+    }
     if (!response?.ok) {
       renderEnabled(!enabled);
       return;
@@ -288,11 +379,29 @@
     }
   });
 
-  pausedOptionsBtn?.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  pausedOptionsBtn?.addEventListener("click", openOptions);
+  setupGoBtn?.addEventListener("click", openOptions);
 
   (async function init() {
-    const hasBase = await loadBase();
-    if (hasBase) await loadResults();
+    try {
+      const hasBase = await loadBase();
+      if (hasBase) await loadResults();
+    } catch {
+      // loadBase already surfaced a "Reconnecting…" status. Try once more
+      // after a brief delay — Chrome usually has the SW alive by then.
+      setTimeout(() => {
+        loadBase()
+          .then((hasBase) => {
+            if (hasBase) return loadResults();
+          })
+          .then(() => {
+            statusEl.textContent = "";
+          })
+          .catch(() => {
+            statusEl.textContent = "Reload this tab and reopen HowFar.";
+          });
+      }, 600);
+    }
     refreshBudget().catch(() => {});
   })();
 })();
